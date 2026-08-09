@@ -1,5 +1,5 @@
 // Bump this version any time app files change, to invalidate old caches.
-const CACHE_VERSION = 'ten-min-mobility-v1';
+const CACHE_VERSION = 'ten-min-mobility-v3';
 const CORE_ASSETS = [
   './',
   './index.html',

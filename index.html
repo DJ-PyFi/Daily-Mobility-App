@@ -259,8 +259,9 @@ function startOfWeek(d){ const nd=new Date(d); const day=nd.getDay(); const diff
 function addDays(base, n){ const nd = new Date(base); nd.setDate(nd.getDate() + n); return nd; }
 function mod(n,m){ return ((n%m)+m)%m; }
 function totalDuration(routine){ return routine.reduce((s,e)=>s+e.duration,0); }
-function filteredPools(selectedEquipment){
-  const allowed = e => e.equipment === 'none' || selectedEquipment.includes(e.equipment);
+function filteredPools(selectedEquipment, excludedExercises){
+  const excludedSet = new Set(excludedExercises || []);
+  const allowed = e => (e.equipment === 'none' || selectedEquipment.includes(e.equipment)) && !excludedSet.has(e.id);
   return { t: TSPINE.filter(allowed), o: OTHER.filter(allowed) };
 }
 function buildRoutine(oSel, tSel){
@@ -274,15 +275,17 @@ function buildRoutine(oSel, tSel){
   }
   return result;
 }
-function routineForDate(d, sessionLength, selectedEquipment){
-  const pools = filteredPools(selectedEquipment);
-  const tCount = sessionLength === 'quick' ? 1 : sessionLength === 'extended' ? 3 : 2;
-  const oCount = sessionLength === 'quick' ? 3 : sessionLength === 'extended' ? 9 : 6;
+function routineForDate(d, sessionLength, selectedEquipment, excludedExercises){
+  const pools = filteredPools(selectedEquipment, excludedExercises);
+  let tCount = sessionLength === 'quick' ? 1 : sessionLength === 'extended' ? 3 : 2;
+  let oCount = sessionLength === 'quick' ? 3 : sessionLength === 'extended' ? 9 : 6;
+  if (pools.t.length === 0) tCount = 0;
+  if (pools.o.length === 0) oCount = 0;
   const dn = dayNumber(d);
-  const tStart = mod(dn * 2, pools.t.length);
-  const tSel = []; for (let i = 0; i < tCount; i++) tSel.push(pools.t[(tStart + i) % pools.t.length]);
-  const oStart = mod(dn * 3, pools.o.length);
-  const oSel = []; for (let i = 0; i < oCount; i++) oSel.push(pools.o[(oStart + i) % pools.o.length]);
+  const tSel = [];
+  if (pools.t.length) { const tStart = mod(dn * 2, pools.t.length); for (let i = 0; i < tCount; i++) tSel.push(pools.t[(tStart + i) % pools.t.length]); }
+  const oSel = [];
+  if (pools.o.length) { const oStart = mod(dn * 3, pools.o.length); for (let i = 0; i < oCount; i++) oSel.push(pools.o[(oStart + i) % pools.o.length]); }
   return buildRoutine(oSel, tSel);
 }
 function loadJSON(key, fallback){ try{ const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }catch(e){ return fallback; } }
@@ -295,7 +298,15 @@ const KEYS = {
   equipment: 'tenmin_equipment',
   sessionLength: 'tenmin_sessionLength',
   playerStyle: 'tenmin_playerStyle',
+  excludedExercises: 'tenmin_excludedExercises',
+  soundEnabled: 'tenmin_soundEnabled',
 };
+
+function groupByArea(list){
+  const order = []; const map = {};
+  list.forEach(e => { if (!map[e.area]) { map[e.area] = []; order.push(e.area); } map[e.area].push(e); });
+  return order.map(area => ({ area, items: map[area] }));
+}
 
 /* ═══════════════════════ App state ═══════════════════════ */
 let state = {
@@ -313,9 +324,11 @@ let state = {
   selectedEquipment: loadJSON(KEYS.equipment, EQUIPMENT_LIST.slice()),
   sessionLength: loadJSON(KEYS.sessionLength, 'standard'),
   playerStyle: loadJSON(KEYS.playerStyle, 'guided'),
+  excludedExercises: loadJSON(KEYS.excludedExercises, []),
+  soundEnabled: loadJSON(KEYS.soundEnabled, true),
 };
 
-function routineFor(date){ return routineForDate(date, state.sessionLength, state.selectedEquipment); }
+function routineFor(date){ return routineForDate(date, state.sessionLength, state.selectedEquipment, state.excludedExercises); }
 
 function setState(patch){
   Object.assign(state, typeof patch === 'function' ? patch(state) : patch);
@@ -325,13 +338,26 @@ function setState(patch){
 /* — actions — */
 function tick(){
   const routine = routineFor(addDays(new Date(), state.sessionOffset));
+  const current = routine[state.currentIndex];
   const left = state.secondsLeft - 1;
+  if (current && current.unilateral) {
+    const switchAt = Math.floor(current.duration / 2);
+    if (left === switchAt + 3) playBeep(700);
+    else if (left === switchAt + 2) playBeep(800);
+    else if (left === switchAt + 1) playBeep(900);
+    else if (left === switchAt) speak('Switch');
+  }
+  // Heads-up countdown before moving on to the next exercise (or finishing the session).
+  if (left === 3) playBeep(700);
+  else if (left === 2) playBeep(800);
+  else if (left === 1) playBeep(900);
   if (left > 0) { setState({ secondsLeft: left }); return; }
   advance(routine);
 }
 function advance(routine){
   if (state.currentIndex + 1 < routine.length) {
-    setState({ currentIndex: state.currentIndex + 1, secondsLeft: routine[state.currentIndex + 1].duration, paused: false });
+    // Manual start: land on the next exercise paused, so there's time to get set up before it counts down.
+    setState({ currentIndex: state.currentIndex + 1, secondsLeft: routine[state.currentIndex + 1].duration, paused: true });
   } else {
     completeSession(routine);
     setState({ playerPhase: 'complete' });
@@ -348,14 +374,18 @@ function completeSession(routine){
 function openPlayer(){
   const offset = state.selectedOffset;
   const routine = routineFor(addDays(new Date(), offset));
-  setState({ playerOpen: true, playerPhase: 'session', currentIndex: 0, secondsLeft: routine[0].duration, paused: false, sessionOffset: offset });
+  if (!routine.length) return;
+  setState({ playerOpen: true, playerPhase: 'session', currentIndex: 0, secondsLeft: routine[0].duration, paused: true, sessionOffset: offset });
 }
 function closePlayer(){ setState({ playerOpen: false }); }
-function togglePause(){ setState({ paused: !state.paused }); }
+function togglePause(){
+  if (state.paused) ensureAudioCtx(); // unlock audio on the user gesture that starts the timer
+  setState({ paused: !state.paused });
+}
 function prevExercise(){
   if (state.currentIndex <= 0) return;
   const routine = routineFor(addDays(new Date(), state.sessionOffset));
-  setState({ currentIndex: state.currentIndex - 1, secondsLeft: routine[state.currentIndex - 1].duration, paused: false });
+  setState({ currentIndex: state.currentIndex - 1, secondsLeft: routine[state.currentIndex - 1].duration, paused: true });
 }
 function nextExercise(){ advance(routineFor(addDays(new Date(), state.sessionOffset))); }
 function setTab(tab){ scrollMemory.main = 0; setState({ tab }); }
@@ -370,12 +400,65 @@ function toggleEquipment(item){
 }
 function setSessionLength(v){ saveJSON(KEYS.sessionLength, v); setState({ sessionLength: v }); }
 function setPlayerStyle(v){ saveJSON(KEYS.playerStyle, v); setState({ playerStyle: v }); }
+function toggleExercise(id){
+  const has = state.excludedExercises.includes(id);
+  const next = has ? state.excludedExercises.filter(x => x !== id) : [...state.excludedExercises, id];
+  saveJSON(KEYS.excludedExercises, next);
+  setState({ excludedExercises: next });
+}
+function resetExercises(){
+  saveJSON(KEYS.excludedExercises, []);
+  setState({ excludedExercises: [] });
+}
+function setSoundEnabled(v){
+  const on = v === 'on';
+  saveJSON(KEYS.soundEnabled, on);
+  if (on) ensureAudioCtx();
+  setState({ soundEnabled: on });
+}
 
 /* — timer loop — */
 setInterval(() => {
   const guided = state.playerStyle !== 'selfpaced';
   if (state.playerOpen && state.playerPhase === 'session' && !state.paused && guided) tick();
 }, 1000);
+
+/* — sound: countdown beeps + a spoken "Switch" cue, no audio files needed — */
+let audioCtx = null;
+function ensureAudioCtx(){
+  if (!state.soundEnabled) return null;
+  if (!audioCtx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (AC) audioCtx = new AC();
+  }
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+  return audioCtx;
+}
+function playBeep(freq){
+  if (!state.soundEnabled) return;
+  const ctx = ensureAudioCtx();
+  if (!ctx) return;
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = 'sine';
+  osc.frequency.value = freq || 880;
+  gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.25, ctx.currentTime + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.18);
+  osc.connect(gain).connect(ctx.destination);
+  osc.start();
+  osc.stop(ctx.currentTime + 0.2);
+}
+function speak(text){
+  if (!state.soundEnabled) return;
+  if (!('speechSynthesis' in window)) return;
+  try {
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = 1.0; u.pitch = 1.0; u.volume = 1.0;
+    window.speechSynthesis.speak(u);
+  } catch (e) {}
+}
 
 /* ═══════════════════════ Icons (inline SVG, matching the design) ═══════════════════════ */
 const ICONS = {
@@ -390,6 +473,8 @@ const ICONS = {
   flameBig: '<svg width="24" height="24" viewBox="0 0 24 24" fill="#fff"><path d="M12 2c1 4-3 5-3 9a3 3 0 0 0 6 0c0-1.5-.7-2.5-1.3-3.2.9.2 2.3 1.7 2.3 4.2a5 5 0 1 1-10 0C6 7.8 9 6 9 3.2 9 2.7 9.2 2.3 9.6 2 10.4 2.7 11.4 2.2 12 2Z"/></svg>',
   routine: '<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9.5 12 3l9 6.5"/><path d="M5 9.5V20a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V9.5"/></svg>',
   equipment: '<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94Z"/></svg>',
+  exercises: '<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2"/><path d="M12 7v6M12 13l-4 7M12 13l4 7M8 10h8"/></svg>',
+  soundOn: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9v6h4l5 5V4L8 9H4z"/><path d="M16 8.5a5 5 0 0 1 0 7"/><path d="M18.5 6a8.5 8.5 0 0 1 0 12"/></svg>',
   progress: '<svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 16v-4"/><path d="M12 16V8"/><path d="M17 16v-9"/></svg>',
   youtube: '<svg width="16" height="16" viewBox="0 0 24 24" fill="var(--color-accent-700)"><path d="M21.6 7.2a2.7 2.7 0 0 0-1.9-1.9C18 5 12 5 12 5s-6 0-7.7.3A2.7 2.7 0 0 0 2.4 7.2 28 28 0 0 0 2 12a28 28 0 0 0 .4 4.8 2.7 2.7 0 0 0 1.9 1.9C6 19 12 19 12 19s6 0 7.7-.3a2.7 2.7 0 0 0 1.9-1.9A28 28 0 0 0 22 12a28 28 0 0 0-.4-4.8ZM10 15V9l5.2 3Z"/></svg>',
 };
@@ -551,14 +636,58 @@ function renderTodayTab(){
       ${selIsDone ? `<span class="tag tag-accent-2">Completed</span>` : ''}
     </div>
     <div style="font-family:var(--font-heading);font-size:23px;margin-top:5px;color:var(--color-text);line-height:1.15;">Thoracic reset + full body</div>
-    <div style="font:500 14px var(--font-body);color:var(--color-accent-800);opacity:0.85;margin-top:3px;">${totalMin} min · ${selRoutine.length} moves</div>
+    ${selRoutine.length
+      ? `<div style="font:500 14px var(--font-body);color:var(--color-accent-800);opacity:0.85;margin-top:3px;">${totalMin} min · ${selRoutine.length} moves</div>
     <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:14px;">${areaChips}</div>
-    <button class="btn btn-primary" style="width:100%;margin-top:16px;height:50px;font-size:15px;" data-act="openPlayer">Start Session</button>
+    <button class="btn btn-primary" style="width:100%;margin-top:16px;height:50px;font-size:15px;" data-act="openPlayer">Start Session</button>`
+      : `<div style="font:500 14px var(--font-body);color:var(--color-accent-800);opacity:0.85;margin-top:3px;">No exercises available with the current settings.</div>
+    <button class="btn btn-secondary" style="width:100%;margin-top:16px;height:50px;font-size:15px;" data-act="setTab" data-arg="exercises">Review Exercises</button>`}
   </div>
   <div style="padding:22px 20px 20px;">
     <h3 style="font-size:14px;text-transform:uppercase;letter-spacing:0.06em;color:var(--color-neutral-700);margin:0 0 10px;">In this session</h3>
-    <div style="display:flex;flex-direction:column;gap:8px;">${sessionRows}</div>
+    <div style="display:flex;flex-direction:column;gap:8px;">${sessionRows || `<p style="font:500 14px var(--font-body);color:var(--color-neutral-700);margin:0;">Turn some exercises back on in the Exercises tab, or check more equipment.</p>`}</div>
   </div>`;
+}
+
+function renderExercisesTab(){
+  const excludedSet = new Set(state.excludedExercises);
+  const groups = groupByArea(ALL_EXERCISES);
+  const sections = groups.map(({ area, items }) => {
+    const includedCount = items.filter(e => !excludedSet.has(e.id)).length;
+    const rows = items.map(e => {
+      const checked = !excludedSet.has(e.id);
+      const boxStyle = checked ? 'background:var(--color-accent-600);border:none;' : 'background:none;border:2px solid var(--color-neutral-300);';
+      return `
+      <div class="card session-row" style="flex-direction:row;align-items:center;gap:12px;padding:12px 14px;" data-act="openDetail" data-arg="${esc(e.id)}">
+        <button type="button" data-act="toggleExercise" data-arg="${esc(e.id)}" style="padding:0;margin:0;cursor:pointer;touch-action:manipulation;width:26px;height:26px;border-radius:8px;flex-shrink:0;box-sizing:border-box;display:flex;align-items:center;justify-content:center;${boxStyle}">${checked ? ICONS.check('#fff', 13) : ''}</button>
+        <div style="flex:1;min-width:0;">
+          <div style="font:600 14px var(--font-body);color:var(--color-text);${checked ? '' : 'opacity:0.5;'}">${esc(e.name)}</div>
+          ${e.equipment !== 'none' ? `<div style="margin-top:4px;"><span class="tag tag-outline">${esc(e.equipment)}</span></div>` : ''}
+        </div>
+        <div style="font:600 13px var(--font-body);color:var(--color-neutral-600);flex-shrink:0;">${e.unilateral ? e.duration + 's · ' + Math.round(e.duration/2) + 's/side' : e.duration + 's'}</div>
+      </div>`;
+    }).join('');
+    return `
+    <div style="padding:0 20px 18px;">
+      <div style="display:flex;align-items:baseline;justify-content:space-between;margin:0 0 8px;">
+        <h3 style="font-size:14px;text-transform:uppercase;letter-spacing:0.06em;color:var(--color-neutral-700);margin:0;">${esc(area)}</h3>
+        <div style="font:600 12px var(--font-body);color:var(--color-neutral-500);">${includedCount} of ${items.length}</div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:8px;">${rows}</div>
+    </div>`;
+  }).join('');
+
+  return `
+  <div style="padding:6px 20px 0;">
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;">
+      <div>
+        <h1 style="font-size:32px;margin:0;">Exercises</h1>
+        <div style="font:500 14px var(--font-body);color:var(--color-neutral-700);margin-top:2px;">Turn off any move you'd rather skip — routines pull only from what's on.</div>
+      </div>
+      <button class="btn btn-secondary" style="flex-shrink:0;white-space:nowrap;" data-act="resetExercises">Include all</button>
+    </div>
+  </div>
+  <div style="padding:16px 0 8px;">${sections}</div>`;
 }
 
 function renderEquipmentTab(){
@@ -582,6 +711,8 @@ function renderEquipmentTab(){
     <label class="seg-opt ${state.sessionLength===v?'is-checked':''}" data-act="setSessionLength" data-arg="${v}">${v.charAt(0).toUpperCase()+v.slice(1)}</label>`).join('');
   const segStyle = [['guided','Guided'],['selfpaced','Self-paced']].map(([v,label]) => `
     <label class="seg-opt ${state.playerStyle===v?'is-checked':''}" data-act="setPlayerStyle" data-arg="${v}">${label}</label>`).join('');
+  const segSound = [['on','Sound on'],['off','Sound off']].map(([v,label]) => `
+    <label class="seg-opt ${(state.soundEnabled?'on':'off')===v?'is-checked':''}" data-act="setSoundEnabled" data-arg="${v}">${label}</label>`).join('');
 
   return `
   <div style="padding:6px 20px 0;">
@@ -601,6 +732,11 @@ function renderEquipmentTab(){
     <div>
       <h3 style="font-size:14px;text-transform:uppercase;letter-spacing:0.06em;color:var(--color-neutral-700);margin:0 0 10px;">Session player</h3>
       <div class="seg">${segStyle}</div>
+    </div>
+    <div>
+      <h3 style="font-size:14px;text-transform:uppercase;letter-spacing:0.06em;color:var(--color-neutral-700);margin:0 0 10px;">Switch-side cues</h3>
+      <div class="seg">${segSound}</div>
+      <p style="font:500 13px/1.5 var(--font-body);color:var(--color-neutral-700);margin:10px 0 0;">A 3-second countdown before each exercise ends, plus a spoken "Switch" on exercises that change sides halfway through. Guided sessions only.</p>
     </div>
   </div>`;
 }
@@ -659,6 +795,7 @@ function renderProgressTab(){
 function renderTabBar(){
   const tabs = [
     { id: 'today', label: 'Routine', icon: ICONS.routine },
+    { id: 'exercises', label: 'Exercises', icon: ICONS.exercises },
     { id: 'equipment', label: 'Equipment', icon: ICONS.equipment },
     { id: 'progress', label: 'Progress', icon: ICONS.progress },
   ];
@@ -699,6 +836,7 @@ function render(){
   } else {
     let tabContent;
     if (state.tab === 'today') tabContent = renderTodayTab();
+    else if (state.tab === 'exercises') tabContent = renderExercisesTab();
     else if (state.tab === 'equipment') tabContent = renderEquipmentTab();
     else tabContent = renderProgressTab();
 
@@ -739,8 +877,10 @@ document.addEventListener('click', (e) => {
   const act = actEl.dataset.act;
   const arg = actEl.dataset.arg;
 
-  // Clicks inside the dialog card itself shouldn't fall through to the backdrop's close.
-  if (act === 'closeDetail' && e.target.closest('.dialog')) return;
+  // Only suppress the backdrop's own close when the click bubbled up from blank
+  // space inside the dialog card — not when the click is on the Close button itself
+  // (which has its own data-act and is matched directly as actEl).
+  if (act === 'closeDetail' && actEl.classList.contains('dialog-backdrop') && e.target !== actEl) return;
 
   switch (act) {
     case 'closePlayer': closePlayer(); break;
@@ -756,6 +896,9 @@ document.addEventListener('click', (e) => {
     case 'toggleEquipment': toggleEquipment(arg); break;
     case 'setSessionLength': setSessionLength(arg); break;
     case 'setPlayerStyle': setPlayerStyle(arg); break;
+    case 'toggleExercise': toggleExercise(arg); break;
+    case 'resetExercises': resetExercises(); break;
+    case 'setSoundEnabled': setSoundEnabled(arg); break;
   }
 });
 
