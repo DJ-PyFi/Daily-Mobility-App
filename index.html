@@ -210,6 +210,19 @@ p { margin: 0 0 var(--space-3); }
 
 <div id="app-shell"><div id="app"></div></div>
 
+<!--
+  Hidden looping video with a near-silent audio track. iOS Safari mutes Web Audio /
+  speechSynthesis output when the phone's silent switch is on, but treats an actively
+  playing <video>'s audio as "media playback," which is exempt from that switch. Keeping
+  this quietly running during a session routes our beeps/voice cue through the same
+  audio session as this video, so they play even when the phone is on silent.
+-->
+<video id="silent-unlock" loop playsinline webkit-playsinline
+  style="position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;left:-9999px;">
+  <source src="assets/silence.mp4" type="video/mp4">
+  <source src="assets/silence.webm" type="video/webm">
+</video>
+
 <script>
 'use strict';
 
@@ -377,9 +390,9 @@ function openPlayer(){
   if (!routine.length) return;
   setState({ playerOpen: true, playerPhase: 'session', currentIndex: 0, secondsLeft: routine[0].duration, paused: true, sessionOffset: offset });
 }
-function closePlayer(){ setState({ playerOpen: false }); }
+function closePlayer(){ pauseSilentUnlock(); setState({ playerOpen: false }); }
 function togglePause(){
-  if (state.paused) { ensureAudioCtx(); primeSpeech(); } // unlock audio on the user gesture that starts the timer
+  if (state.paused) { ensureAudioCtx(); primeSpeech(); playSilentUnlock(); } // unlock audio on the user gesture that starts the timer
   setState({ paused: !state.paused });
 }
 function prevExercise(){
@@ -413,12 +426,14 @@ function resetExercises(){
 function setSoundEnabled(v){
   const on = v === 'on';
   saveJSON(KEYS.soundEnabled, on);
-  if (on) { ensureAudioCtx(); primeSpeech(); }
+  if (on) { ensureAudioCtx(); primeSpeech(); playSilentUnlock(); }
+  else pauseSilentUnlock();
   setState({ soundEnabled: on });
 }
 function testSound(){
   ensureAudioCtxRaw();
   primeSpeech();
+  playSilentUnlock();
   playBeepRaw(700);
   setTimeout(() => playBeepRaw(800), 220);
   setTimeout(() => playBeepRaw(900), 440);
@@ -433,6 +448,20 @@ setInterval(() => {
 
 /* — sound: countdown beeps + a spoken "Switch" cue, no audio files needed — */
 let audioCtx = null;
+/* — silent-switch bypass: a quietly looping video keeps iOS routing audio through
+   "media playback" instead of "ambient," which is the category the phone's hardware
+   mute switch actually silences. Must be started from a direct user gesture. — */
+function playSilentUnlock(){
+  const v = document.getElementById('silent-unlock');
+  if (!v) return;
+  const p = v.play();
+  if (p && p.catch) p.catch(() => {});
+}
+function pauseSilentUnlock(){
+  const v = document.getElementById('silent-unlock');
+  if (v && !v.paused) v.pause();
+}
+
 function ensureAudioCtxRaw(){
   if (!audioCtx) {
     const AC = window.AudioContext || window.webkitAudioContext;
@@ -507,6 +536,7 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
   if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
   if ('speechSynthesis' in window && window.speechSynthesis.paused) window.speechSynthesis.resume();
+  if (state.playerOpen) playSilentUnlock();
 });
 
 /* ═══════════════════════ Icons (inline SVG, matching the design) ═══════════════════════ */

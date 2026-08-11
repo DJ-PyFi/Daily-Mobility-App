@@ -1,5 +1,5 @@
 // Bump this version any time app files change, to invalidate old caches.
-const CACHE_VERSION = 'ten-min-mobility-v4';
+const CACHE_VERSION = 'ten-min-mobility-v5';
 const CORE_ASSETS = [
   './',
   './index.html',
@@ -12,6 +12,8 @@ const CORE_ASSETS = [
   './icons/icon-512.png',
   './icons/icon-maskable-512.png',
   './icons/apple-touch-icon.png',
+  './assets/silence.mp4',
+  './assets/silence.webm',
 ];
 
 self.addEventListener('install', (event) => {
