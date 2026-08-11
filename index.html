@@ -355,15 +355,15 @@ function tick(){
   const left = state.secondsLeft - 1;
   if (current && current.unilateral) {
     const switchAt = Math.floor(current.duration / 2);
-    if (left === switchAt + 3) playBeep(700);
-    else if (left === switchAt + 2) playBeep(800);
-    else if (left === switchAt + 1) playBeep(900);
+    if (left === switchAt + 3) { playBeep(700); speak('Three'); }
+    else if (left === switchAt + 2) { playBeep(800); speak('Two'); }
+    else if (left === switchAt + 1) { playBeep(900); speak('One'); }
     else if (left === switchAt) speak('Switch');
   }
   // Heads-up countdown before moving on to the next exercise (or finishing the session).
-  if (left === 3) playBeep(700);
-  else if (left === 2) playBeep(800);
-  else if (left === 1) playBeep(900);
+  if (left === 3) { playBeep(700); speak('Three'); }
+  else if (left === 2) { playBeep(800); speak('Two'); }
+  else if (left === 1) { playBeep(900); speak('One'); }
   if (left > 0) { setState({ secondsLeft: left }); return; }
   advance(routine);
 }
@@ -434,10 +434,10 @@ function testSound(){
   ensureAudioCtxRaw();
   primeSpeech();
   playSilentUnlock();
-  playBeepRaw(700);
-  setTimeout(() => playBeepRaw(800), 220);
-  setTimeout(() => playBeepRaw(900), 440);
-  setTimeout(() => speakRaw('Switch'), 720);
+  playBeepRaw(700); speakRaw('Three');
+  setTimeout(() => { playBeepRaw(800); speakRaw('Two'); }, 700);
+  setTimeout(() => { playBeepRaw(900); speakRaw('One'); }, 1400);
+  setTimeout(() => speakRaw('Switch'), 2300);
 }
 
 /* — timer loop — */
@@ -815,7 +815,7 @@ function renderEquipmentTab(){
     <div>
       <h3 style="font-size:14px;text-transform:uppercase;letter-spacing:0.06em;color:var(--color-neutral-700);margin:0 0 10px;">Switch-side cues</h3>
       <div class="seg">${segSound}</div>
-      <p style="font:500 13px/1.5 var(--font-body);color:var(--color-neutral-700);margin:10px 0 12px;">A 3-second countdown before each exercise ends, plus a spoken "Switch" on exercises that change sides halfway through. Guided sessions only.</p>
+      <p style="font:500 13px/1.5 var(--font-body);color:var(--color-neutral-700);margin:10px 0 12px;">A spoken "Three, two, one" before each exercise ends, plus "Switch" on exercises that change sides halfway through. Guided sessions only.</p>
       <button class="btn btn-secondary" style="width:100%;height:44px;" data-act="testSound">Test sound</button>
     </div>
   </div>`;
