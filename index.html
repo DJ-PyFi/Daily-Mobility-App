@@ -202,6 +202,8 @@ p { margin: 0 0 var(--space-3); }
 .day-strip { display: flex; gap: 8px; overflow-x: auto; padding: 14px 20px 8px; scroll-snap-type: x proximity; }
 
 .ring-arc { transition: stroke-dashoffset 0.92s linear; }
+.count-warn { display: inline-block; animation: count-pop 0.9s ease-out; }
+@keyframes count-pop { 0% { transform: scale(1.45); } 100% { transform: scale(1); } }
 .session-row { cursor: pointer; touch-action: manipulation; }
 .equipment-row { cursor: pointer; touch-action: manipulation; -webkit-user-select: none; user-select: none; }
 </style>
@@ -353,17 +355,20 @@ function tick(){
   const routine = routineFor(addDays(new Date(), state.sessionOffset));
   const current = routine[state.currentIndex];
   const left = state.secondsLeft - 1;
-  if (current && current.unilateral) {
-    const switchAt = Math.floor(current.duration / 2);
-    if (left === switchAt + 3) { playBeep(700); speak('Three'); }
-    else if (left === switchAt + 2) { playBeep(800); speak('Two'); }
-    else if (left === switchAt + 1) { playBeep(900); speak('One'); }
-    else if (left === switchAt) speak('Switch');
-  }
-  // Heads-up countdown before moving on to the next exercise (or finishing the session).
-  if (left === 3) { playBeep(700); speak('Three'); }
-  else if (left === 2) { playBeep(800); speak('Two'); }
-  else if (left === 1) { playBeep(900); speak('One'); }
+  // Sound is a bonus layer: if anything in the audio path throws, the timer must still run.
+  try {
+    if (current && current.unilateral) {
+      const switchAt = Math.floor(current.duration / 2);
+      if (left === switchAt + 3) { playBeep(700); cue('three', 'Three'); }
+      else if (left === switchAt + 2) { playBeep(800); cue('two', 'Two'); }
+      else if (left === switchAt + 1) { playBeep(900); cue('one', 'One'); }
+      else if (left === switchAt) cue('switch', 'Switch');
+    }
+    // Heads-up countdown before moving on to the next exercise (or finishing the session).
+    if (left === 3) { playBeep(700); cue('three', 'Three'); }
+    else if (left === 2) { playBeep(800); cue('two', 'Two'); }
+    else if (left === 1) { playBeep(900); cue('one', 'One'); }
+  } catch (e) {}
   if (left > 0) { setState({ secondsLeft: left }); return; }
   advance(routine);
 }
@@ -392,8 +397,10 @@ function openPlayer(){
 }
 function closePlayer(){ pauseSilentUnlock(); setState({ playerOpen: false }); }
 function togglePause(){
-  if (state.paused) { ensureAudioCtx(); primeSpeech(); playSilentUnlock(); } // unlock audio on the user gesture that starts the timer
+  const starting = state.paused;
+  // Start the timer FIRST. Audio setup runs afterwards and can never stop it.
   setState({ paused: !state.paused });
+  if (starting) unlockAudio(); // still inside the tap, which iOS requires for audio
 }
 function prevExercise(){
   if (state.currentIndex <= 0) return;
@@ -426,18 +433,20 @@ function resetExercises(){
 function setSoundEnabled(v){
   const on = v === 'on';
   saveJSON(KEYS.soundEnabled, on);
-  if (on) { ensureAudioCtx(); primeSpeech(); playSilentUnlock(); }
-  else pauseSilentUnlock();
   setState({ soundEnabled: on });
+  if (on) unlockAudio(); else safely(pauseSilentUnlock);
 }
 function testSound(){
-  ensureAudioCtxRaw();
-  primeSpeech();
-  playSilentUnlock();
-  playBeepRaw(700); speakRaw('Three');
-  setTimeout(() => { playBeepRaw(800); speakRaw('Two'); }, 700);
-  setTimeout(() => { playBeepRaw(900); speakRaw('One'); }, 1400);
-  setTimeout(() => speakRaw('Switch'), 2300);
+  unlockAudio();
+  showSoundStatus('Testing…');
+  // Wait for the voice clips to finish loading so the very first test uses them.
+  Promise.resolve(loadCues()).catch(() => {}).then(() => {
+    safely(() => { playBeepRaw(700); cueRaw('three', 'Three'); });
+    setTimeout(() => safely(() => { playBeepRaw(800); cueRaw('two', 'Two'); }), 800);
+    setTimeout(() => safely(() => { playBeepRaw(900); cueRaw('one', 'One'); }), 1600);
+    setTimeout(() => safely(() => cueRaw('switch', 'Switch')), 2500);
+    setTimeout(() => showSoundStatus(soundDiagnostics()), 3400);
+  });
 }
 
 /* — timer loop — */
@@ -446,11 +455,24 @@ setInterval(() => {
   if (state.playerOpen && state.playerPhase === 'session' && !state.paused && guided) tick();
 }, 1000);
 
-/* — sound: countdown beeps + a spoken "Switch" cue, no audio files needed — */
+/* — sound: countdown beeps + spoken cues. Everything here is wrapped so a failure
+   in audio can never stop the timer. — */
 let audioCtx = null;
-/* — silent-switch bypass: a quietly looping video keeps iOS routing audio through
-   "media playback" instead of "ambient," which is the category the phone's hardware
-   mute switch actually silences. Must be started from a direct user gesture. — */
+function safely(fn){ try { return fn(); } catch (e) { return undefined; } }
+
+/* iOS 16.4+ has an official switch for "play even when the phone is on silent":
+   audioSession.type = 'playback'. We set it on load and again on every tap. */
+function setAudioSessionPlayback(){
+  try {
+    if (navigator.audioSession && navigator.audioSession.type !== 'playback') {
+      navigator.audioSession.type = 'playback';
+    }
+  } catch (e) {}
+}
+setAudioSessionPlayback();
+
+/* Fallback for older iOS: a quietly looping video makes iOS treat our audio as
+   "media playback" instead of "ambient" (which the mute switch silences). */
 function playSilentUnlock(){
   const v = document.getElementById('silent-unlock');
   if (!v) return;
@@ -467,13 +489,54 @@ function ensureAudioCtxRaw(){
     const AC = window.AudioContext || window.webkitAudioContext;
     if (AC) audioCtx = new AC();
   }
-  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+  // 'suspended' = not yet unlocked; 'interrupted' = iOS paused it (call, Siri, lock). Resume both.
+  if (audioCtx && audioCtx.state !== 'running' && audioCtx.state !== 'closed') {
+    const r = audioCtx.resume();
+    if (r && r.catch) r.catch(() => {});
+  }
   return audioCtx;
 }
 function ensureAudioCtx(){
   if (!state.soundEnabled) return null;
   return ensureAudioCtxRaw();
 }
+
+/* Everything that must happen inside a tap for iOS to allow sound later. Each step is
+   independent: one failing never blocks the others. */
+function unlockAudio(){
+  safely(setAudioSessionPlayback);
+  safely(ensureAudioCtxRaw);
+  safely(() => { // classic iOS unlock: play one silent sample inside the gesture
+    if (!audioCtx) return;
+    const b = audioCtx.createBuffer(1, 1, 22050);
+    const s = audioCtx.createBufferSource();
+    s.buffer = b; s.connect(audioCtx.destination); s.start(0);
+  });
+  safely(loadCues);
+  safely(primeSpeech);
+  safely(playSilentUnlock);
+}
+
+/* — spoken cues: short recorded clips played through Web Audio. These don't depend on
+   the phone's built-in speech engine, which is what tends to change between iOS versions. — */
+const CUE_NAMES = ['three', 'two', 'one', 'switch'];
+const cueBuffers = {};
+let cuesPromise = null;
+function loadCues(){
+  if (cuesPromise) return cuesPromise;
+  if (!audioCtx) return null;
+  cuesPromise = Promise.all(CUE_NAMES.map(name =>
+    fetch('assets/cues/' + name + '.mp3')
+      .then(r => { if (!r.ok) throw new Error('cue fetch ' + r.status); return r.arrayBuffer(); })
+      .then(buf => new Promise((res, rej) => audioCtx.decodeAudioData(buf, res, rej)))
+      .then(decoded => { cueBuffers[name] = decoded; })
+      .catch(() => {})
+  )).then(() => {
+    if (CUE_NAMES.some(n => !cueBuffers[n])) cuesPromise = null; // let a later tap retry
+  });
+  return cuesPromise;
+}
+
 function playBeepRaw(freq){
   const ctx = ensureAudioCtxRaw();
   if (!ctx) return;
@@ -490,19 +553,16 @@ function playBeepRaw(freq){
 }
 function playBeep(freq){
   if (!state.soundEnabled) return;
-  playBeepRaw(freq);
+  safely(() => playBeepRaw(freq));
 }
-// Keep a live reference to the current utterance — iOS Safari has a well-known bug
-// where an utterance with no other reference can get garbage-collected mid-speech,
-// silently killing the voice before it plays.
+
+// Keep a live reference to the current utterance — iOS Safari can garbage-collect an
+// unreferenced one mid-speech.
 let currentUtterance = null;
 function speakRaw(text){
   if (!('speechSynthesis' in window)) return;
   try {
     if (window.speechSynthesis.paused) window.speechSynthesis.resume();
-    // Only cancel if something is actually mid-utterance — calling cancel() right
-    // before speak() on every call is a known way to get speechSynthesis stuck
-    // silently on iOS Safari.
     if (window.speechSynthesis.speaking) window.speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
     u.rate = 1.0; u.pitch = 1.0; u.volume = 1.0;
@@ -514,12 +574,31 @@ function speak(text){
   if (!state.soundEnabled) return;
   speakRaw(text);
 }
+
+/* Play a recorded cue; if the clip or audio engine isn't usable, fall back to the
+   phone's built-in voice so there's still a spoken cue. */
+function cueRaw(name, fallbackText){
+  const ctx = ensureAudioCtxRaw();
+  const buf = cueBuffers[name];
+  if (ctx && buf && ctx.state === 'running') {
+    try {
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(ctx.destination);
+      src.start();
+      return;
+    } catch (e) {}
+  }
+  speakRaw(fallbackText);
+}
+function cue(name, fallbackText){
+  if (!state.soundEnabled) return;
+  safely(() => cueRaw(name, fallbackText));
+}
+
 let speechPrimed = false;
 function primeSpeech(){
-  // iOS Safari in particular only allows speechSynthesis to actually produce sound the
-  // first time if it's triggered directly inside a user gesture — later calls from a
-  // setInterval callback (like our countdown) silently do nothing unless we've "primed"
-  // it this way once already.
+  // iOS only lets speechSynthesis make sound if it was first used inside a tap.
   if (speechPrimed || !('speechSynthesis' in window)) return;
   speechPrimed = true;
   try {
@@ -529,14 +608,28 @@ function primeSpeech(){
     window.speechSynthesis.speak(u);
   } catch (e) {}
 }
-// A locked screen or backgrounded tab commonly suspends the audio context and can
-// leave speech synthesis paused — resume both the instant the app is visible again,
-// so sound doesn't silently stay dead for the rest of a session.
+
+/* Plain-language readout for the "Test sound" button, so a silent phone tells us why. */
+function soundDiagnostics(){
+  const engine = audioCtx ? audioCtx.state : 'not available';
+  const clips = CUE_NAMES.filter(n => cueBuffers[n]).length + '/' + CUE_NAMES.length;
+  const session = (navigator.audioSession && navigator.audioSession.type) || 'not supported';
+  const voice = ('speechSynthesis' in window) ? 'available' : 'not available';
+  return 'Audio engine: ' + engine + ' · Voice clips: ' + clips + ' · Silent-mode setting: ' + session + ' · Built-in voice: ' + voice;
+}
+function showSoundStatus(text){
+  const el = document.getElementById('sound-status');
+  if (el) el.textContent = text;
+}
+
+// A locked screen or backgrounded app can leave audio suspended/interrupted — wake it
+// back up the moment the app is visible again.
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
-  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
-  if ('speechSynthesis' in window && window.speechSynthesis.paused) window.speechSynthesis.resume();
-  if (state.playerOpen) playSilentUnlock();
+  safely(setAudioSessionPlayback);
+  safely(ensureAudioCtxRaw);
+  if ('speechSynthesis' in window && window.speechSynthesis.paused) safely(() => window.speechSynthesis.resume());
+  if (state.playerOpen && !state.paused) safely(playSilentUnlock);
 });
 
 /* ═══════════════════════ Icons (inline SVG, matching the design) ═══════════════════════ */
@@ -605,7 +698,7 @@ function renderSessionPhase(){
         <circle cx="95" cy="95" r="80" fill="none" stroke="var(--color-neutral-100)" stroke-width="12"></circle>
         <circle class="ring-arc" cx="95" cy="95" r="80" fill="none" stroke="var(--color-accent-600)" stroke-width="12" stroke-linecap="round" stroke-dasharray="${circumference}" stroke-dashoffset="${ringOffset}"></circle>
       </svg>
-      <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-family:var(--font-heading);font-size:42px;color:var(--color-text);">${secondsLeft}</div>
+      <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-family:var(--font-heading);font-size:42px;color:${(secondsLeft <= 3 && !state.paused) ? 'var(--color-accent-600)' : 'var(--color-text)'};"><span class="${(secondsLeft <= 3 && !state.paused) ? 'count-warn' : ''}">${secondsLeft}</span></div>
     </div>
     <p style="font:500 14px/1.5 var(--font-body);color:var(--color-neutral-700);text-align:center;margin-top:18px;max-width:270px;">${esc(current.cue)}</p>
   </div>
@@ -817,6 +910,7 @@ function renderEquipmentTab(){
       <div class="seg">${segSound}</div>
       <p style="font:500 13px/1.5 var(--font-body);color:var(--color-neutral-700);margin:10px 0 12px;">A spoken "Three, two, one" before each exercise ends, plus "Switch" on exercises that change sides halfway through. Guided sessions only.</p>
       <button class="btn btn-secondary" style="width:100%;height:44px;" data-act="testSound">Test sound</button>
+      <p id="sound-status" style="font:500 12px/1.5 var(--font-body);color:var(--color-neutral-600);margin:10px 0 0;min-height:18px;"></p>
     </div>
   </div>`;
 }
