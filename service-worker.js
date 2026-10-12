@@ -1,5 +1,5 @@
 // Bump this version any time app files change, to invalidate old caches.
-const CACHE_VERSION = 'ten-min-mobility-v7';
+const CACHE_VERSION = 'ten-min-mobility-v8';
 const CORE_ASSETS = [
   './',
   './index.html',
@@ -18,6 +18,10 @@ const CORE_ASSETS = [
   './assets/cues/two.mp3',
   './assets/cues/one.mp3',
   './assets/cues/switch.mp3',
+  './assets/cues/beep-three.mp3',
+  './assets/cues/beep-two.mp3',
+  './assets/cues/beep-one.mp3',
+  './assets/keepalive.mp3',
 ];
 
 self.addEventListener('install', (event) => {
